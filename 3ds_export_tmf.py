@@ -19,7 +19,7 @@
 bl_info = {
     "name": "Export 3DS for TrackMania Forever",
     "author": "Glauco Bacchi, Campbell Barton, Bob Holcomb, Richard Lärkäng, Damien McGinnes, Mark Stijnman, Sergey Savkin, Selene Bray-Hernandez (maintainer)",
-    "version": (1, 0, 5),
+    "version": (1, 0, 6),
     "blender": (5, 1, 2),
     "location": "File > Export > 3DS for TMF (.3ds)",
     "description": "Export 3DS model for TrackMania Forever (.3ds)",
