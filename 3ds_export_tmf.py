@@ -19,7 +19,7 @@
 bl_info = {
     "name": "Export 3DS for TrackMania Forever",
     "author": "Glauco Bacchi, Campbell Barton, Bob Holcomb, Richard Lärkäng, Damien McGinnes, Mark Stijnman, Sergey Savkin, Selene Bray-Hernandez (maintainer)",
-    "version": (1, 0, 6),
+    "version": (1, 1, 1),
     "blender": (5, 1, 2),
     "location": "File > Export > 3DS for TMF (.3ds)",
     "description": "Export 3DS model for TrackMania Forever (.3ds)",
@@ -36,11 +36,21 @@ import math
 import mathutils
 import bmesh
 
+from bpy_extras.io_utils import (
+    axis_conversion
+)
+
+# Export settings
+p_do_no_name_limit: bool = True
+p_do_normals: bool = True
+p_do_colors: bool = True
+p_do_uvs: bool = True
+
 ###### EXPORT OPERATOR #######
-class Export_tmf(bpy.types.Operator, bpy_extras.io_utils.ExportHelper):
-    """Export 3DS model for Trackmania Forever"""
-    bl_idname = "export_scene.tmf"
-    bl_label = "Export 3DS for TMF (.3ds)"
+class Export_tm(bpy.types.Operator, bpy_extras.io_utils.ExportHelper):
+    """Export 3DS model for TrackMania"""
+    bl_idname = "export_scene.tm"
+    bl_label = "Export 3DS for TM (for 3ds2gbxml) (.3ds)"
 
     filename_ext = ".3ds"
     filter_glob : bpy.props.StringProperty(
@@ -53,13 +63,46 @@ class Export_tmf(bpy.types.Operator, bpy_extras.io_utils.ExportHelper):
         description="Export selected objects only",
         default=False,
         )
+    
+    remove_char_limit : bpy.props.BoolProperty(
+        name="Remove Name Limit",
+        description="Remove default 12 character name limit (breaks compatibility)",
+        default=True,
+        )
+    
+    export_normals : bpy.props.BoolProperty(
+        name="Vertex Normals",
+        description="Export Vertex Normals (breaks compatibility)",
+        default=True,
+        )
+    
+    export_colors : bpy.props.BoolProperty(
+        name="Vertex Colors",
+        description="Export Vertex Colors (breaks compatibility)",
+        default=True,
+        )
+    
+    more_uvs : bpy.props.BoolProperty(
+        name="All UV Layers",
+        description="Export all UV layers (breaks compatibility)",
+        default=True,
+        )
 
     def execute(self, context):
+        global p_do_no_name_limit
+        global p_do_normals
+        global p_do_colors
+        global p_do_uvs
 
         keywords = self.as_keywords()
-
         start_time = time.time()
         print('\n_____START_____')
+
+        p_do_no_name_limit = keywords['remove_char_limit']
+        p_do_normals = keywords['export_normals']
+        p_do_colors = keywords['export_colors']
+        p_do_uvs = keywords['more_uvs']
+
         props = self.properties
         filepath = self.filepath
         filepath = bpy.path.ensure_ext(filepath, self.filename_ext)
@@ -77,15 +120,15 @@ class Export_tmf(bpy.types.Operator, bpy_extras.io_utils.ExportHelper):
 ### REGISTER ###
 
 def menu_func(self, context):
-    self.layout.operator(Export_tmf.bl_idname, text="3DS for TMF (.3ds)")
+    self.layout.operator(Export_tm.bl_idname, text="3DS for TMF (.3ds)")
 
 
 def register():
-    bpy.utils.register_class(Export_tmf)
+    bpy.utils.register_class(Export_tm)
     bpy.types.TOPBAR_MT_file_export.append(menu_func)
 
 def unregister():
-    bpy.utils.unregister_class(Export_tmf)
+    bpy.utils.unregister_class(Export_tm)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func)
 
 ######################################################
@@ -150,6 +193,11 @@ OBJECT_UV               = 0x4140  # The UV texture coordinates
 OBJECT_SMOOTH           = 0x4150  # Smooth group
 OBJECT_TRANS_MATRIX     = 0x4160  # The Object Matrix
 
+# Custom (breaks 3ds format compatibility)
+OBJECT_VERTEX_NORMALS   = 0x4112  # The objects vertex normals
+OBJECT_VERTEX_COLORS    = 0x4115  # The objects vertex colors
+OBJECT_UV_LIST          = 0x4145  # The UV texture coordinates list
+
 #>------ sub defines of KFDATA
 KFDATA_KFHDR            = 0xB00A
 KFDATA_KFSEG            = 0xB008
@@ -177,9 +225,12 @@ def sane_name(name):
     name_fixed = name_mapping.get(name)
     if name_fixed is not None:
         return name_fixed
-
+    
     # strip non ascii chars
-    new_name_clean = new_name = name.encode("ASCII", "replace").decode("ASCII")[:12]
+    if p_do_no_name_limit:
+        new_name_clean = new_name = name.encode("ASCII", "replace").decode("ASCII")
+    else:
+        new_name_clean = new_name = name.encode("ASCII", "replace").decode("ASCII")[:12]
     i = 0
 
     while new_name in name_unique:
@@ -662,7 +713,7 @@ class tri_wrapper(object):
         self.offset = [0, 0, 0]  # offset indices
         self.group = group
 
-def extract_triangles(mesh):
+def extract_triangles(mesh, uv_layer = None):
     '''Extract triangles from a mesh.
 
     If the mesh contains quads, they will be split into triangles.'''
@@ -685,7 +736,7 @@ def extract_triangles(mesh):
     '''
 
     tri_list = []
-    do_uv = mesh.uv_layers
+    do_uv = uv_layer
     if not do_uv:
         face_uv = None
 
@@ -693,7 +744,7 @@ def extract_triangles(mesh):
     for i, face in enumerate(mesh.loop_triangles):
         f_v = face.vertices
 
-        uf = mesh.uv_layers.active.data if do_uv else None
+        uf = uv_layer.data if do_uv else None
 
         if do_uv:
             f_uv = [uf[l].uv for l in face.loops]
@@ -720,7 +771,7 @@ def extract_triangles(mesh):
     '''
     return tri_list
 
-def remove_face_uv(verts, tri_list):
+def remove_face_uv(verts, tri_list, color_attrib = None):
     """Remove face UV coordinates from a list of triangles.
 
     Since 3ds files only support one pair of uv coordinates for each vertex, face uv coordinates
@@ -755,15 +806,35 @@ def remove_face_uv(verts, tri_list):
     vert_index = 0
     vert_array = _3ds_array()
     uv_array = _3ds_array()
+    color_array = _3ds_array()
+    normal_array = _3ds_array()
     index_list = []
+    color_layer = None
+
+    if color_attrib:
+        for layer in color_attrib:
+            color_layer = layer
+            print('GOT COLOR! (in remove_face_uv)')
+            break
+
     for i, vert in enumerate(verts):
         index_list.append(vert_index)
 
         pt = _3ds_point_3d(vert.co)  # reuse, should be ok
+        nt = _3ds_point_3d(vert.normal)  # reuse (again), should be ok
+        if color_layer:
+            color = color_layer.data[i]
+            rgb_tuple = (color.color[0], color.color[1], color.color[2])
+            vert_color = _3ds_rgb_color(rgb_tuple)
+        
+
         uvmap = [None] * len(unique_uvs[i])
         for ii, uv_3ds in unique_uvs[i].values():
             # add a vertex duplicate to the vertex_array for every uv associated with this vertex:
             vert_array.add(pt)
+            normal_array.add(nt)
+            if color_layer: color_array.add(vert_color)
+            
             # add the uv coordinate to the uv array:
             # This for loop does not give uv's ordered by ii, so we create a new map
             # and add the uv's later
@@ -783,7 +854,72 @@ def remove_face_uv(verts, tri_list):
             tri.offset[i] += index_list[tri.vertex_index[i]]
         tri.vertex_index = tri.offset
 
-    return vert_array, uv_array, tri_list
+    return vert_array, uv_array, tri_list, color_array, normal_array
+
+def remove_face_only_uv(verts, tri_list):
+
+    # initialize a list of UniqueLists, one per vertex:
+    #uv_list = [UniqueList() for i in xrange(len(verts))]
+    unique_uvs = [{} for i in range(len(verts))]
+
+    # for each face uv coordinate, add it to the UniqueList of the vertex
+    for tri in tri_list:
+        for i in range(3):
+            # store the index into the UniqueList for future reference:
+            # offset.append(uv_list[tri.vertex_index[i]].add(_3ds_point_uv(tri.faceuvs[i])))
+
+            context_uv_vert = unique_uvs[tri.vertex_index[i]]
+            uvkey = tri.faceuvs[i]
+
+            offset_index__uv_3ds = context_uv_vert.get(uvkey)
+
+            if not offset_index__uv_3ds:
+                offset_index__uv_3ds = context_uv_vert[uvkey] = len(context_uv_vert), _3ds_point_uv(uvkey)
+
+            tri.offset[i] = offset_index__uv_3ds[0]
+
+    # At this point, each vertex has a UniqueList containing every uv coordinate that is associated with it
+    # only once.
+
+    # Now we need to duplicate every vertex as many times as it has uv coordinates and make sure the
+    # faces refer to the new face indices:
+    vert_index = 0
+    vert_array = _3ds_array()
+    uv_array = _3ds_array()
+    color_array = _3ds_array()
+    index_list = []
+
+    for i, vert in enumerate(verts):
+        index_list.append(vert_index)
+
+        pt = _3ds_point_3d(vert.co)  # reuse, should be ok
+        
+
+        uvmap = [None] * len(unique_uvs[i])
+        for ii, uv_3ds in unique_uvs[i].values():
+            # add a vertex duplicate to the vertex_array for every uv associated with this vertex:
+            vert_array.add(pt)
+            
+            # add the uv coordinate to the uv array:
+            # This for loop does not give uv's ordered by ii, so we create a new map
+            # and add the uv's later
+            # uv_array.add(uv_3ds)
+            uvmap[ii] = uv_3ds
+
+        # Add the uv's in the correct order
+        for uv_3ds in uvmap:
+            # add the uv coordinate to the uv array:
+            uv_array.add(uv_3ds)
+
+        vert_index += len(unique_uvs[i])
+
+    # Make sure the triangle vertex indices now refer to the new vertex list:
+    for tri in tri_list:
+        for i in range(3):
+            tri.offset[i] += index_list[tri.vertex_index[i]]
+        tri.vertex_index = tri.offset
+
+    return uv_array
 
 def make_faces_chunk(tri_list, mesh, materialDict):
     """Make a chunk for the faces.
@@ -869,24 +1005,59 @@ def make_vert_chunk(vert_array):
     vert_chunk.add_variable("vertices", vert_array)
     return vert_chunk
 
+def make_vert_normals_chunk(norm_array):
+    """Make a vertex color chunk out of an array of colors."""
+    norm_chunk = _3ds_chunk(OBJECT_VERTEX_NORMALS)
+    norm_chunk.add_variable("vertex normals", norm_array)
+    return norm_chunk
+
+def make_vert_color_chunk(color_array):
+    """Make a vertex color chunk out of an array of colors."""
+    color_chunk = _3ds_chunk(OBJECT_VERTEX_COLORS)
+    color_chunk.add_variable("vertex colors", color_array)
+    return color_chunk
+
 def make_uv_chunk(uv_array):
     """Make a UV chunk out of an array of UVs."""
     uv_chunk = _3ds_chunk(OBJECT_UV)
     uv_chunk.add_variable("uv coords", uv_array)
     return uv_chunk
 
+def make_uv_list_chunk(uv_list):
+    """Make a UV chunk out of multiple arrays of UVs."""
+    uvl_chunk = _3ds_chunk(OBJECT_UV_LIST)
+    uvl_chunk.add_variable("num uvs", _3ds_ushort(len(uv_list)))
+    for uv_array in uv_list:
+        uvl_chunk.add_variable("uv coords", uv_array)
+    return uvl_chunk
+
 def make_mesh_chunk(mesh, materialDict, ob, name_to_id, name_to_scale, name_to_pos, name_to_rot):
     '''Make a chunk out of a Blender mesh.'''
 
     # Extract the triangles from the mesh:
-    tri_list = extract_triangles(mesh)
+    tri_list = extract_triangles(mesh, mesh.uv_layers.active)
+
+    color_array = None
+    normal_array = None
+    uv_list: list = []
 
     if mesh.uv_layers:
         # Remove the face UVs and convert it to vertex UV:
-        vert_array, uv_array, tri_list = remove_face_uv(mesh.vertices, tri_list)
+        vert_array, uv_array, tri_list, color_array, normal_array = remove_face_uv(mesh.vertices, tri_list, mesh.color_attributes)
+        print(len(uv_array.values))
+
+        if p_do_uvs:
+            # Make the uv list
+            for uv_layer in mesh.uv_layers:
+                uv_tri_list = extract_triangles(mesh, uv_layer)
+                new_uv_array = remove_face_only_uv(mesh.vertices, uv_tri_list)
+                print(len(new_uv_array.values))
+                uv_list.append(new_uv_array)
+
     else:
         # Add the vertices to the vertex array:
         vert_array = _3ds_array()
+        print(f'vert cnt: {len(mesh.vertices)}')
         for vert in mesh.vertices:
             vert_array.add(_3ds_point_3d(vert.co))
         # If the mesh has vertex UVs, create an array of UVs:
@@ -898,16 +1069,44 @@ def make_mesh_chunk(mesh, materialDict, ob, name_to_id, name_to_scale, name_to_p
         #     # no UV at all:
         uv_array = None
 
+    color_layer = None
+
     # create the chunk:
     mesh_chunk = _3ds_chunk(OBJECT_MESH)
 
     # add vertex chunk:
     mesh_chunk.add_subchunk(make_vert_chunk(vert_array))
+
+    if p_do_normals:
+        # add vertex normals chunk:
+        if normal_array:
+            mesh_chunk.add_subchunk((make_vert_normals_chunk(normal_array)))
+
+    if p_do_colors:
+        print('CHECKING FOR COLORS')
+        if not color_array:
+            for layer in mesh.color_attributes:
+                color_layer = layer
+                print('GOT COLOR!')
+                break
+
+            if color_layer:
+                color_array = _3ds_array()
+                print(f'color cnt: {len(color_layer.data)}')
+                for color in color_layer.data:
+                    rgb_tuple = (color.color[0], color.color[1], color.color[2])
+                    vert_color = _3ds_rgb_color(rgb_tuple)
+                    color_array.add(vert_color)
+                # add vertex colors chunk
+                mesh_chunk.add_subchunk(make_vert_color_chunk(color_array))
+        else:
+            mesh_chunk.add_subchunk(make_vert_color_chunk(color_array))
+
     # add faces chunk:
 
     mesh_chunk.add_subchunk(make_faces_chunk(tri_list, mesh, materialDict))
 
-    mesh1 = _3ds_chunk(OBJECT_TRANS_MATRIX);
+    mesh1 = _3ds_chunk(OBJECT_TRANS_MATRIX)
 
     # 4KEX: 3DS mesh matrix. Apply the worldspace scale and positioning relative to the parent (if any).
     if (ob.parent == None) or (ob.parent.name not in name_to_id):
@@ -968,6 +1167,9 @@ def make_mesh_chunk(mesh, materialDict, ob, name_to_id, name_to_scale, name_to_p
     # if available, add uv chunk:
     if uv_array:
         mesh_chunk.add_subchunk(make_uv_chunk(uv_array))
+
+    if len(uv_list) > 0:
+        mesh_chunk.add_subchunk(make_uv_list_chunk(uv_list))
 
     return mesh_chunk
 
@@ -1124,6 +1326,11 @@ def do_export(filename,use_selection=False):
 
     """Save the Blender scene to a 3ds file."""
 
+    global_matrix = axis_conversion(
+        to_forward='-Z',
+        to_up='Y',
+    ).to_4x4()
+
     sce = bpy.context.scene
 
     # Initialize the main chunk (primary):
@@ -1163,6 +1370,8 @@ def do_export(filename,use_selection=False):
         for ob_derived, mat in derived:
             if ob.type not in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META'}:
                 continue
+
+            # ob_derived.matrix_world = global_matrix
 
             try:
                 data = ob_derived.to_mesh()
