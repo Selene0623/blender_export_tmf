@@ -73,3 +73,6 @@ Thumbs.db
 *.blend1
 *.blend2
 *.b3d
+
+# Local documentation
+AGENTS.md
